@@ -163,12 +163,30 @@ func RunServices(configJSON []byte) (retErr error) {
 			waitGroup.Done()
 			ticker := time.NewTicker(time.Duration(config.LoadMonitorPeriodSeconds) * time.Second)
 			defer ticker.Stop()
+
+			previousBytesReceived, previousBytesSent, err := getNetworkBytesTransferred()
+			if err != nil {
+				log.WithTraceFields(LogFields{"error": errors.Trace(err)}).Error("failed to get initial network bytes transferred")
+				// Proceed with 0 bytes in the server_load log
+			}
+
 			for {
 				select {
 				case <-shutdownBroadcast:
 					return
 				case <-ticker.C:
-					logServerLoad(support)
+					currentBytesReceived, currentBytesSent, err := getNetworkBytesTransferred()
+					if err != nil {
+						log.WithTraceFields(LogFields{"error": errors.Trace(err)}).Error("failed to get current network bytes transferred")
+						// Proceed with 0 bytes in the server_load log
+					}
+
+					totalBytesReceived := currentBytesReceived - previousBytesReceived
+					totalBytesSent := currentBytesSent - previousBytesSent
+
+					logServerLoad(support, true, totalBytesReceived, totalBytesSent)
+
+					previousBytesReceived, previousBytesSent = currentBytesReceived, currentBytesSent
 				}
 			}
 		}()
@@ -284,7 +302,7 @@ loop:
 			case signalProcessProfiles <- struct{}{}:
 			default:
 			}
-			logServerLoad(support)
+			logServerLoad(support, false, 0, 0)
 
 		case <-systemStopSignal:
 			log.WithTrace().Info("shutdown by system")
@@ -362,11 +380,16 @@ func outputProcessProfiles(config *Config, filenameSuffix string) {
 	}
 }
 
-func logServerLoad(support *SupportServices) {
+func logServerLoad(support *SupportServices, logNetworkBytes bool, totalBytesReceived int64, totalBytesSent int64) {
 
 	serverLoad := getRuntimeMetrics()
 
 	serverLoad["event_name"] = "server_load"
+
+	if logNetworkBytes {
+		serverLoad["total_bytes_received"] = totalBytesReceived
+		serverLoad["total_bytes_sent"] = totalBytesSent
+	}
 
 	establishTunnels, establishLimitedCount :=
 		support.TunnelServer.GetEstablishTunnelsMetrics()
